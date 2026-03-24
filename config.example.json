@@ -1,0 +1,34 @@
+{
+  "_說明": "複製此文件為 ~/.threads-filter-comment.json 並填入你的配置",
+
+  "account": "帳號名稱",
+  "threads_skills_dir": "/Users/你的用戶名/Desktop/threadsskill/threads-skills",
+  "log_file": "~/.threads/filter-comment.log",
+
+  "max_runs_per_cycle": 4,
+  "rest_duration_hours": 1,
+
+  "ai_enabled": true,
+  "ai_api_url": "http://192.168.x.x:8003/v1/chat/completions",
+  "ai_api_key": "你的API密鑰",
+  "ai_model": "Qwen/Qwen3.5-27B-FP8",
+
+  "promo_mention": "@your_clinic_account",
+  "promo_text": "在這裡填入推廣文案，留空則只發 AI 評論",
+
+  "keywords": [
+    "外貌", "皮膚", "保養", "護膚", "抗老", "美白", "痘痘", "毛孔", "斑點",
+    "醫美", "整形", "微整", "玻尿酸", "肉毒", "雷射", "光療", "美容診所",
+    "自信", "變美", "外貌焦慮", "素顏", "底妝", "遮瑕"
+  ],
+
+  "exclude_keywords": [
+    "醫院", "診所", "院長", "醫生推薦", "我們家", "歡迎預約", "歡迎諮詢",
+    "價格", "優惠", "促銷", "line:", "微信", "wechat"
+  ],
+
+  "priority_keywords": [
+    "韓國", "首爾", "江南", "釜山",
+    "韓國醫美", "首爾醫美", "飛韓國"
+  ]
+}
