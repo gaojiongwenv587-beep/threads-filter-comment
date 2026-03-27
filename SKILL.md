@@ -1,6 +1,6 @@
 ---
 name: threads-filter-comment
-description: Threads 醫美篩選 Skill。輸入帖子列表，關鍵詞篩選 + AI 判斷，輸出適合評論的帖子。純篩選，不抓取、不發送。
+description: "Threads 醫美 AI 篩選。觸發詞：篩選帖子、AI篩選、醫美篩選、過濾帖子、找適合評論的帖子、哪些帖子適合評論、篩選目標用戶、找潛在客戶帖子、醫美相關帖子篩選、filter-comment。輸入帖子JSON，輸出AI判斷後適合評論的候選列表，不抓取不發送。"
 ---
 
 # threads-filter-comment — 醫美篩選 Skill
