@@ -1,6 +1,19 @@
 ---
+license: MIT-0
+acceptLicenseTerms: true
 name: threads-filter-comment
-description: "Threads 醫美 AI 篩選。觸發詞：篩選帖子、AI篩選、醫美篩選、過濾帖子、找適合評論的帖子、哪些帖子適合評論、篩選目標用戶、找潛在客戶帖子、醫美相關帖子篩選、filter-comment。輸入帖子JSON，輸出AI判斷後適合評論的候選列表，不抓取不發送。"
+description: "Threads 醫美 AI 篩選。觸發詞：篩選帖子、AI篩選、醫美篩選、過濾帖子、找適合評論的帖子、哪些帖子適合評論、篩選目標用戶、找潛在客戶帖子、醫美相關帖子篩選、filter-comment、智能篩選、篩選哪些帖子值得評論、幫我篩一下、AI判斷帖子。輸入帖子JSON，輸出AI判斷後適合評論的候選列表，不抓取不發送。"
+version: 1.0.0
+metadata:
+  openclaw:
+    homepage: https://github.com/gaojiongwenv587-beep/threads-skills
+    requires:
+      bins:
+        - python3
+    emoji: "🔬"
+    os:
+      - darwin
+      - linux
 ---
 
 # threads-filter-comment — 醫美篩選 Skill
