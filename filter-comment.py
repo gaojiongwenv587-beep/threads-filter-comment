@@ -2,27 +2,39 @@
 """Threads 醫美篩選 — 純篩選工具。
 
 從 stdin 或 --posts-file 讀入帖子 JSON，
-關鍵詞篩選 + AI 判斷，輸出適合評論的帖子列表。
+關鍵詞篩選 + 三維熱度評分 + AI 判斷，輸出適合評論的帖子列表。
 
 使用方式：
-    # 從 stdin
+    # 單源（從 stdin）
     uv run python scripts/cli.py list-feeds --limit 200 | python filter-comment.py
 
-    # 從文件
+    # 單源（從文件）
     python filter-comment.py --posts-file /tmp/posts.json
 
-    # 關閉 AI（只做關鍵詞篩選）
+    # 三源（Feed + 關鍵詞搜索 + 對標帳號）
+    python filter-comment.py \\
+        --feed-file /tmp/feed.json \\
+        --keyword-file /tmp/keyword.json \\
+        --benchmark-file /tmp/benchmark.json
+
+    # 關閉 AI（只做關鍵詞篩選 + 評分）
     python filter-comment.py --no-ai --posts-file /tmp/posts.json
 
 輸出（stdout JSON）：
     {
       "total_input": 200,
+      "total_deduplicated": 180,
       "total_filtered": 5,
       "results": [
         {
           "post": { ...原始帖子欄位... },
+          "sources": ["feed", "keyword"],
           "priority": "high",
           "match_reason": "韓國相關",
+          "score_total": 72.3,
+          "score_interaction": 35.0,
+          "score_cross_source": 20.0,
+          "score_timeliness": 25.0,
           "ai_should_comment": true,
           "ai_comment": "...",
           "ai_reason": "..."
@@ -36,6 +48,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 import urllib.request
 from pathlib import Path
 
@@ -68,6 +81,8 @@ POLITICAL_KEYWORDS = [
 ]
 
 
+# ─── 輔助函式 ──────────────────────────────────────────────────────────────────
+
 def load_config() -> dict:
     config = DEFAULT_CONFIG.copy()
     if CONFIG_FILE.exists():
@@ -78,15 +93,146 @@ def load_config() -> dict:
     return config
 
 
-def parse_likes(post: dict) -> int:
+def parse_count(val: object) -> int:
+    """將 likeCount / replyCount / repostCount 轉為整數。支援 '1.2K'、'3M'。"""
+    if val is None:
+        return 0
+    s = str(val).strip().replace(",", "")
     try:
-        return int(post.get("likeCount", "0").replace(",", "").replace("K", "000"))
+        if s.upper().endswith("K"):
+            return int(float(s[:-1]) * 1_000)
+        if s.upper().endswith("M"):
+            return int(float(s[:-1]) * 1_000_000)
+        return int(float(s))
     except Exception:
         return 0
 
 
-def keyword_filter(posts: list, config: dict) -> list[dict]:
-    """關鍵詞篩選，返回帶優先級的候選列表。"""
+def load_posts_from_file(path: str, source: str) -> list[dict]:
+    """載入帖子文件，為每條帖子打上 _source 標籤。"""
+    raw = Path(path).read_text(encoding="utf-8")
+    data = json.loads(raw)
+    if isinstance(data, dict):
+        posts = data.get("posts", data.get("feeds", data.get("results", [])))
+    elif isinstance(data, list):
+        posts = data
+    else:
+        posts = []
+    for post in posts:
+        post["_source"] = source
+    return posts
+
+
+def merge_and_deduplicate(all_posts: list[dict]) -> list[dict]:
+    """去重，同一 postId 合併 sources 集合。"""
+    seen: dict[str, dict] = {}
+    for post in all_posts:
+        pid = post.get("postId") or post.get("url", "")
+        source = post.pop("_source", "feed")
+        if pid not in seen:
+            seen[pid] = post
+            seen[pid]["_sources"] = {source}
+        else:
+            seen[pid]["_sources"].add(source)
+    return list(seen.values())
+
+
+# ─── 三維熱度評分 ──────────────────────────────────────────────────────────────
+
+def _cross_source_score(sources: set[str]) -> float:
+    """跨源驗證分（滿分 35）。
+
+    三源同時出現 → 35  最強熱點信號
+    Feed + 對標  → 22  平台推流 + 同行關注
+    Feed + 關鍵詞 → 20  平台推流 + 主動搜索
+    僅 Feed      → 10
+    僅關鍵詞     → 8
+    僅對標帳號   → 8
+    """
+    has_feed      = "feed" in sources
+    has_keyword   = "keyword" in sources
+    has_benchmark = "benchmark" in sources
+    if has_feed and has_keyword and has_benchmark:
+        return 35.0
+    if has_feed and has_benchmark:
+        return 22.0
+    if has_feed and has_keyword:
+        return 20.0
+    if has_feed:
+        return 10.0
+    if has_keyword:
+        return 8.0
+    if has_benchmark:
+        return 8.0
+    return 0.0
+
+
+def _timeliness_score(created_at_raw: object, now: float) -> float:
+    """時效性分（滿分 25）。
+
+    0-6h   → 25.0  發酵中，參與價值最高
+    6-24h  → 16.7  正常
+    24-48h → 10.0  熱度衰減
+    48h+   →  3.3  基本冷卻
+    """
+    if not created_at_raw:
+        return 5.0
+    try:
+        ts = float(str(created_at_raw).strip())
+    except Exception:
+        return 5.0
+
+    age_hours = (now - ts) / 3600
+    if age_hours <= 6:
+        multiplier = 1.000   # 原始 ×1.5，歸一化後 1.0
+    elif age_hours <= 24:
+        multiplier = 0.667   # ×1.0 / 1.5
+    elif age_hours <= 48:
+        multiplier = 0.400   # ×0.6 / 1.5
+    else:
+        multiplier = 0.133   # ×0.2 / 1.5
+    return round(25.0 * multiplier, 1)
+
+
+def compute_scores(candidates: list[dict], now: float) -> list[dict]:
+    """計算三維熱度分並寫回 candidates，按綜合分降序排列。
+
+    互動分（40）：歸一化(點贊 + 回覆×2 + 轉發×3)
+    跨源分（35）：根據來源組合給分
+    時效分（25）：根據發帖時間衰減
+    綜合分 = 互動×0.4 + 跨源×0.35 + 時效×0.25
+    """
+    # 計算原始互動值，用於全局歸一化
+    raw_interactions = []
+    for item in candidates:
+        post = item["post"]
+        raw = (
+            parse_count(post.get("likeCount"))
+            + parse_count(post.get("replyCount")) * 2
+            + parse_count(post.get("repostCount")) * 3
+        )
+        raw_interactions.append(raw)
+
+    max_interaction = max(raw_interactions, default=1) or 1
+
+    for item, raw in zip(candidates, raw_interactions):
+        i_score = round((raw / max_interaction) * 40.0, 1)
+        c_score = _cross_source_score(item.get("_sources", {"feed"}))
+        t_score = _timeliness_score(item["post"].get("createdAt"), now)
+
+        item["score_interaction"]  = i_score
+        item["score_cross_source"] = c_score
+        item["score_timeliness"]   = t_score
+        item["score_total"]        = round(i_score * 0.4 + c_score * 0.35 + t_score * 0.25, 1)
+
+    candidates.sort(key=lambda x: x["score_total"], reverse=True)
+    return candidates
+
+
+# ─── 關鍵詞篩選 ────────────────────────────────────────────────────────────────
+
+def keyword_filter(posts: list[dict], config: dict) -> list[dict]:
+    """關鍵詞篩選，返回帶優先級的候選列表（保留 _sources）。"""
     keywords     = config.get("keywords", DEFAULT_CONFIG["keywords"])
     exclude      = config.get("exclude_keywords", DEFAULT_CONFIG["exclude_keywords"])
     priority_kws = config.get("priority_keywords", DEFAULT_CONFIG["priority_keywords"])
@@ -95,22 +241,30 @@ def keyword_filter(posts: list, config: dict) -> list[dict]:
     for post in posts:
         content = post.get("content", "")
 
-        # 排除政治
         if any(kw in content for kw in POLITICAL_KEYWORDS):
             continue
-        # 排除同業/廣告
         if any(kw in content for kw in exclude):
             continue
 
         if any(kw in content for kw in priority_kws):
-            results.append({"post": post, "priority": "high", "match_reason": "韓國/首爾相關"})
+            results.append({
+                "post": post,
+                "priority": "high",
+                "match_reason": "韓國/首爾相關",
+                "_sources": post.get("_sources", {"feed"}),
+            })
         elif any(kw in content for kw in keywords):
-            results.append({"post": post, "priority": "medium", "match_reason": "醫美相關"})
+            results.append({
+                "post": post,
+                "priority": "medium",
+                "match_reason": "醫美相關",
+                "_sources": post.get("_sources", {"feed"}),
+            })
 
-    # 高優先在前，同優先級按點讚數降序
-    results.sort(key=lambda x: (0 if x["priority"] == "high" else 1, -parse_likes(x["post"])))
     return results
 
+
+# ─── AI 分析 ───────────────────────────────────────────────────────────────────
 
 def analyze_with_ai(content: str, config: dict) -> dict | None:
     """AI 判斷是否適合評論並生成評論文字。"""
@@ -159,72 +313,133 @@ def analyze_with_ai(content: str, config: dict) -> dict | None:
     return None
 
 
-def run(posts: list, config: dict, ai_enabled: bool) -> dict:
-    """主篩選邏輯，返回結果 dict。"""
+# ─── 主流程 ────────────────────────────────────────────────────────────────────
+
+def run(posts: list[dict], config: dict, ai_enabled: bool, total_input: int) -> dict:
+    """主篩選邏輯。
+
+    1. 關鍵詞篩選（排除廣告/政治）
+    2. 三維熱度評分（互動 + 跨源 + 時效）
+    3. AI 語境判斷
+    """
+    now = time.time()
+
     candidates = keyword_filter(posts, config)
     print(f"關鍵詞篩選：{len(posts)} → {len(candidates)} 條候選", file=sys.stderr)
+
+    candidates = compute_scores(candidates, now)
 
     results = []
     for item in candidates:
         post    = item["post"]
         content = post.get("content", "")
-        entry   = {
-            "post":             post,
-            "priority":         item["priority"],
-            "match_reason":     item["match_reason"],
+        sources = sorted(item.get("_sources", {"feed"}))
+
+        # 清除 post 上殘留的 _sources（set 不能 JSON 序列化）
+        post.pop("_sources", None)
+
+        entry = {
+            "post":              post,
+            "sources":           sources,
+            "priority":          item["priority"],
+            "match_reason":      item["match_reason"],
+            "score_total":       item["score_total"],
+            "score_interaction": item["score_interaction"],
+            "score_cross_source": item["score_cross_source"],
+            "score_timeliness":  item["score_timeliness"],
             "ai_should_comment": None,
             "ai_comment":        "",
             "ai_reason":         "",
         }
 
         if ai_enabled and config.get("ai_enabled", True):
-            print(f"  AI 分析：{post.get('postId', '')} ...", file=sys.stderr)
+            print(f"  AI 分析：{post.get('postId', '')} (分數 {item['score_total']}) ...",
+                  file=sys.stderr)
             ai = analyze_with_ai(content, config)
             if ai:
                 entry["ai_should_comment"] = ai.get("should_comment")
                 entry["ai_comment"]        = ai.get("comment", "")
                 entry["ai_reason"]         = ai.get("reason", "")
         else:
-            entry["ai_should_comment"] = True  # 不用 AI 則預設通過
+            entry["ai_should_comment"] = True
 
         results.append(entry)
 
     return {
-        "total_input":    len(posts),
-        "total_filtered": len(results),
-        "results":        results,
+        "total_input":        total_input,
+        "total_deduplicated": len(posts),
+        "total_filtered":     len(results),
+        "results":            results,
     }
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Threads 醫美篩選（純篩選，不抓取不發送）")
-    parser.add_argument("--posts-file", help="帖子 JSON 文件路徑（不指定則從 stdin 讀）")
-    parser.add_argument("--no-ai", action="store_true", help="關閉 AI 分析，只做關鍵詞篩選")
+
+    # 單源輸入
+    parser.add_argument("--posts-file", help="帖子 JSON 文件路徑（不指定則從 stdin 讀），source=feed")
+
+    # 三源輸入（與 --posts-file 互斥）
+    parser.add_argument("--feed-file",      help="首頁 Feed JSON 文件")
+    parser.add_argument("--keyword-file",   help="關鍵詞搜索結果 JSON 文件")
+    parser.add_argument("--benchmark-file", help="對標帳號帖子 JSON 文件")
+
+    parser.add_argument("--no-ai", action="store_true", help="關閉 AI 分析，只做關鍵詞篩選 + 評分")
     parser.add_argument("--only-approved", action="store_true",
                         help="只輸出 ai_should_comment=true 的帖子")
     args = parser.parse_args()
 
-    # 讀入帖子
-    if args.posts_file:
-        raw = Path(args.posts_file).read_text(encoding="utf-8")
-    else:
-        raw = sys.stdin.read()
+    all_posts: list[dict] = []
 
-    try:
-        data = json.loads(raw)
-        # 兼容 list-feeds 輸出格式（{"posts": [...]}）和純數組
-        if isinstance(data, dict):
-            posts = data.get("posts", data.get("feeds", []))
-        elif isinstance(data, list):
-            posts = data
+    if args.feed_file or args.keyword_file or args.benchmark_file:
+        # 三源模式
+        if args.feed_file:
+            posts = load_posts_from_file(args.feed_file, "feed")
+            print(f"Feed：載入 {len(posts)} 條", file=sys.stderr)
+            all_posts.extend(posts)
+        if args.keyword_file:
+            posts = load_posts_from_file(args.keyword_file, "keyword")
+            print(f"關鍵詞：載入 {len(posts)} 條", file=sys.stderr)
+            all_posts.extend(posts)
+        if args.benchmark_file:
+            posts = load_posts_from_file(args.benchmark_file, "benchmark")
+            print(f"對標帳號：載入 {len(posts)} 條", file=sys.stderr)
+            all_posts.extend(posts)
+    else:
+        # 單源模式（stdin 或 --posts-file）
+        if args.posts_file:
+            raw = Path(args.posts_file).read_text(encoding="utf-8")
         else:
-            posts = []
-    except Exception as e:
-        print(json.dumps({"error": f"JSON 解析失敗：{e}"}, ensure_ascii=False))
-        sys.exit(1)
+            raw = sys.stdin.read()
+
+        try:
+            data = json.loads(raw)
+            if isinstance(data, dict):
+                posts = data.get("posts", data.get("feeds", data.get("results", [])))
+            elif isinstance(data, list):
+                posts = data
+            else:
+                posts = []
+        except Exception as e:
+            print(json.dumps({"error": f"JSON 解析失敗：{e}"}, ensure_ascii=False))
+            sys.exit(1)
+
+        for p in posts:
+            p["_source"] = "feed"
+        all_posts.extend(posts)
+
+    total_input = len(all_posts)
+
+    # 去重並合併 sources
+    merged = merge_and_deduplicate(all_posts)
+    print(f"去重：{total_input} → {len(merged)} 條", file=sys.stderr)
+
+    # 把 _sources 從 post 移到外層（避免污染 post 原始資料）
+    for post in merged:
+        post["_sources"] = post.pop("_sources", {"feed"})
 
     config = load_config()
-    output = run(posts, config, ai_enabled=not args.no_ai)
+    output = run(merged, config, ai_enabled=not args.no_ai, total_input=total_input)
 
     if args.only_approved:
         output["results"] = [r for r in output["results"] if r.get("ai_should_comment")]
