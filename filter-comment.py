@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """Threads 醫美篩選 — 純篩選工具。
 
 從 stdin 或 --posts-file 讀入帖子 JSON，
@@ -46,11 +47,25 @@
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import sys
 import time
 import urllib.request
 from pathlib import Path
+
+
+def _ensure_utf8_streams() -> None:
+    """Windows 下強制 stdin/stdout/stderr 使用 UTF-8，避免中文亂碼。"""
+    if sys.platform != "win32":
+        return
+    if hasattr(sys.stdin, "buffer"):
+        sys.stdin = io.TextIOWrapper(sys.stdin.buffer, encoding="utf-8", errors="replace")
+    if hasattr(sys.stdout, "buffer"):
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    if hasattr(sys.stderr, "buffer"):
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+
 
 CONFIG_FILE = Path.home() / ".threads-filter-comment.json"
 
@@ -89,7 +104,7 @@ def load_config() -> dict:
         try:
             config.update(json.loads(CONFIG_FILE.read_text(encoding="utf-8")))
         except Exception as e:
-            print(f"⚠️  讀取配置失敗：{e}", file=sys.stderr)
+            print(f"[warn] 讀取配置失敗：{e}", file=sys.stderr)
     return config
 
 
@@ -271,7 +286,7 @@ def analyze_with_ai(content: str, config: dict) -> dict | None:
     api_url = config.get("ai_api_url", "")
     api_key = config.get("ai_api_key", "")
     if not api_url or not api_key:
-        print("  ⚠️  AI 未配置（ai_api_url / ai_api_key 為空）", file=sys.stderr)
+        print("  [warn] AI 未配置（ai_api_url / ai_api_key 為空）", file=sys.stderr)
         return None
 
     prompt = f"""你是一個台灣女孩，關注醫美保養。判斷是否要在這個帖子留言。
@@ -374,6 +389,7 @@ def run(posts: list[dict], config: dict, ai_enabled: bool, total_input: int) -> 
 
 
 def main() -> None:
+    _ensure_utf8_streams()
     parser = argparse.ArgumentParser(description="Threads 醫美篩選（純篩選，不抓取不發送）")
 
     # 單源輸入

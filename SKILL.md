@@ -14,6 +14,7 @@ metadata:
     os:
       - darwin
       - linux
+      - windows
 ---
 
 # threads-filter-comment — 醫美篩選 Skill

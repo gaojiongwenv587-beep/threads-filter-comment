@@ -1,8 +1,16 @@
 {
-  "_說明": "複製此文件為 ~/.threads-filter-comment.json 並填入你的配置",
+  "_說明": [
+    "複製此文件：",
+    "  macOS/Linux: cp config.example.json ~/.threads-filter-comment.json",
+    "  Windows:     copy config.example.json %USERPROFILE%\\.threads-filter-comment.json"
+  ],
 
   "account": "帳號名稱",
-  "threads_skills_dir": "/Users/你的用戶名/Desktop/threadsskill/threads-skills",
+
+  "_threads_skills_dir_說明": "threads-skills 項目目錄（macOS/Linux 用正斜槓，Windows 用雙反斜槓或正斜槓均可）",
+  "threads_skills_dir": "C:/Users/你的用戶名/Desktop/threadsskill/threads-skills",
+
+  "_log_file_說明": "日誌路徑，~ 會自動展開為用戶主目錄（跨平台）",
   "log_file": "~/.threads/filter-comment.log",
 
   "max_runs_per_cycle": 4,
